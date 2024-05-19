@@ -1,35 +1,69 @@
+/*
+
+    - This module is a simple contract for reverse auction.
+    - Anyone could initiate a new auction and become the auctioneer.
+    - Everyone could perform as a legitimate bidder.
+    - The auctioneer keep reducing the price from a maximal price setted at the beginning.
+    - When the price has been reduced to what is expected, the bid pay the price to obtain the auction item.
+    - After that, the auctioneer could claim the auction proceed.
+    - The auctioneer is able to stop the auction at any time.
+
+*/
 module auction::auction {
+
+    //==============================================================================================
+    // Dependencies
+    //==============================================================================================
 
     use sui::balance::{Self, Balance};
     use sui::event::{Self};
 
-    // Errors
+    //==============================================================================================
+    // Error codes
+    //==============================================================================================
+
+    // When auction has already ended.
     const EAuctionHasEnded: u64 = 0;
+    // When auction is still going on.
     const EAuctionHasNotEnded: u64 = 1;
+    // When the bidder provides fewer balance.
     const EBalanceNotEnough: u64 = 2;
+    // When the auctioneer sets new price but higher than the present.
     const ENewPriceMustBeLower: u64 = 3;
+    // When the auctioneer provides wrong cap.
     const EAuctionIDMismatch: u64 = 4;
 
-    //Events
+    //==============================================================================================
+    // Events
+    //==============================================================================================
+
+    // When a new auction is created.
     public struct AuctionCreated has copy, drop {
         auction_id: ID,
         maximal_price: u64,
     }
 
-    public struct NewPriceSetted has copy, drop {
+    // When a new price is setted.
+    public struct NewPrice has copy, drop {
         auction_id: ID,
         new_price: u64,
     }
 
-    public struct AuctionEnded has copy, drop {
+    // When an auction is successfully ended.
+    public struct AuctionSucceeded has copy, drop {
         auction_id: ID,
         final_price: u64,
         bidder_address: address,
     }
 
+    // When an auction is stopped by the auctioneer.
     public struct AuctionStopped has copy, drop {
         auction_id: ID,
     }
+
+    //==============================================================================================
+    // Structs
+    //==============================================================================================
 
     // The auction object
     public struct Auction<T0: store, phantom T1> has key {
@@ -45,6 +79,19 @@ module auction::auction {
         id: UID,
         auction_id: ID
     }
+
+    //==============================================================================================
+    // Getters
+    //==============================================================================================
+
+    // Get the present auction price
+    public fun get_present_price<T0: store, T1> (auction: &Auction<T0, T1>): u64 {
+        return auction.present_price
+    }
+
+    //==============================================================================================
+    // Public functions
+    //==============================================================================================
 
     // Create a new auction
     public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): AuctCap {
@@ -73,7 +120,7 @@ module auction::auction {
         assert!(!auction.has_ended, EAuctionHasEnded);
         assert!(new_price < auction.present_price, ENewPriceMustBeLower);
         auction.present_price = new_price;
-        event::emit(NewPriceSetted {
+        event::emit(NewPrice {
             auction_id: object::uid_to_inner(&auction.id),
             new_price: auction.present_price
         });
@@ -87,7 +134,7 @@ module auction::auction {
         balance::join(&mut auction.proceed, proceed);
         auction.has_ended = true;
         let item = option::extract(&mut auction.item);
-        event::emit(AuctionEnded {
+        event::emit(AuctionSucceeded {
             auction_id: object::uid_to_inner(&auction.id),
             final_price: auction.present_price,
             bidder_address: ctx.sender()
@@ -122,11 +169,5 @@ module auction::auction {
         object::delete(id);
         return item
     }
-
-    //Getter
-    public fun get_present_price<T0: store, T1> (auction: &Auction<T0, T1>): u64 {
-        return auction.present_price
-    }
-
 
 }
