@@ -1,12 +1,11 @@
 /*
 
-    - This module is a simple contract for reverse auction.
-    - Anyone could initiate a new auction and become the auctioneer.
-    - Everyone could perform as a legitimate bidder.
-    - The auctioneer keep reducing the price from a maximal price setted at the beginning.
-    - When the price has been reduced to what is expected, the bid pay the price to obtain the auction item.
-    - After that, the auctioneer could claim the auction proceed.
-    - The auctioneer is able to stop the auction at any time.
+    - Any user can initiate a new auction and assume the role of the auctioneer.
+    - All users can participate as legitimate bidders.
+    - The auctioneer continuously reduces the price from an initial maximum set at the start of the auction.
+    - When the price drops to an acceptable level, the bidders can pay that price to obtain the auction item.
+    - After the sale, the auctioneer can claim the auction proceeds.
+    - The auctioneer retains the ability to stop the auction at any time.
 
 */
 module auction::auction {
@@ -43,8 +42,8 @@ module auction::auction {
         maximal_price: u64,
     }
 
-    // When a new price is setted.
-    public struct NewPrice has copy, drop {
+    // When a new price is set.
+    public struct NewPriceSet has copy, drop {
         auction_id: ID,
         new_price: u64,
     }
@@ -75,7 +74,7 @@ module auction::auction {
     }
 
     // Capability of being the auctioneer
-    public struct AuctCap has key, store {
+    public struct AuctionCap has key, store {
         id: UID,
         auction_id: ID
     }
@@ -94,7 +93,7 @@ module auction::auction {
     //==============================================================================================
 
     // Create a new auction
-    public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): AuctCap {
+    public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): AuctionCap {
         let auction = Auction<T0, T1> {
             id: object::new(ctx),
             item: option::some(item),
@@ -102,7 +101,7 @@ module auction::auction {
             has_ended: false,
             proceed: balance::zero()
         };
-        let auct_cap = AuctCap {
+        let auction_cap = AuctionCap {
             id: object::new(ctx),
             auction_id: object::uid_to_inner(&auction.id)
         };
@@ -111,16 +110,16 @@ module auction::auction {
             maximal_price: auction.present_price
         });
         transfer::share_object(auction);
-        return auct_cap
+        return auction_cap
     }
 
     // The auctioneer could set a new auction price
-    public fun set_price<T0: store, T1> (auction: &mut Auction<T0, T1>, auct_cap: &AuctCap, new_price: u64) {
-        assert!(object::uid_to_inner(&auction.id) == auct_cap.auction_id, EAuctionIDMismatch);
+    public fun set_price<T0: store, T1> (auction: &mut Auction<T0, T1>, auction_cap: &AuctionCap, new_price: u64) {
+        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
         assert!(!auction.has_ended, EAuctionHasEnded);
         assert!(new_price < auction.present_price, ENewPriceMustBeLower);
         auction.present_price = new_price;
-        event::emit(NewPrice {
+        event::emit(NewPriceSet {
             auction_id: object::uid_to_inner(&auction.id),
             new_price: auction.present_price
         });
@@ -143,20 +142,20 @@ module auction::auction {
     }
 
     // The auctioneer could claim the proceeds after the auction is successfully ended
-    public fun claim<T0: store, T1> (auction: Auction<T0, T1>, auct_cap: AuctCap): Balance<T1> {
-        assert!(object::uid_to_inner(&auction.id) == auct_cap.auction_id, EAuctionIDMismatch);
+    public fun claim<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): Balance<T1> {
+        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
         assert!(auction.has_ended, EAuctionHasNotEnded);
         let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
         object::delete(id);
         option::destroy_none(item);
-        let AuctCap { id, auction_id: _ } = auct_cap;
+        let AuctionCap { id, auction_id: _ } = auction_cap;
         object::delete(id);
         return proceed
     }
 
     // The auctioneer could stop the auction before the auction is ended
-    public fun stop<T0: store, T1> (auction: Auction<T0, T1>, auct_cap: AuctCap): T0 {
-        assert!(object::uid_to_inner(&auction.id) == auct_cap.auction_id, EAuctionIDMismatch);
+    public fun stop<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): T0 {
+        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
         assert!(!auction.has_ended, EAuctionHasEnded);
         let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
         event::emit(AuctionStopped {
@@ -165,7 +164,7 @@ module auction::auction {
         object::delete(id);
         balance::destroy_zero(proceed);
         let item = option::destroy_some(item);
-        let AuctCap { id, auction_id: _ } = auct_cap;
+        let AuctionCap { id, auction_id: _ } = auction_cap;
         object::delete(id);
         return item
     }
