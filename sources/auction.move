@@ -16,6 +16,11 @@ module auction::auction {
 
     use sui::balance::{Self, Balance};
     use sui::event::{Self};
+    use sui::object::{Self, UID, ID};
+    use sui::tx_context::TxContext;
+    use sui::transfer;
+    use sui::option;
+    use sui::assert;
 
     //==============================================================================================
     // Error codes
@@ -65,7 +70,7 @@ module auction::auction {
     //==============================================================================================
 
     // The auction object
-    public struct Auction<T0: store, phantom T1> has key {
+    public struct Auction<T0: store, T1> has key {
         id: UID,
         item: Option<T0>,
         present_price: u64,
@@ -85,7 +90,12 @@ module auction::auction {
 
     // Get the present auction price
     public fun get_present_price<T0: store, T1> (auction: &Auction<T0, T1>): u64 {
-        return auction.present_price
+        auction.present_price
+    }
+
+    // Get auction status
+    public fun has_auction_ended<T0: store, T1>(auction: &Auction<T0, T1>): bool {
+        auction.has_ended
     }
 
     //==============================================================================================
@@ -93,7 +103,7 @@ module auction::auction {
     //==============================================================================================
 
     // Create a new auction
-    public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): AuctionCap {
+    public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): (Auction<T0, T1>, AuctionCap) {
         let auction = Auction<T0, T1> {
             id: object::new(ctx),
             item: option::some(item),
@@ -109,8 +119,7 @@ module auction::auction {
             auction_id: object::uid_to_inner(&auction.id),
             maximal_price: auction.present_price
         });
-        transfer::share_object(auction);
-        return auction_cap
+        (auction, auction_cap)
     }
 
     // The auctioneer could set a new auction price
@@ -136,28 +145,28 @@ module auction::auction {
         event::emit(AuctionSucceeded {
             auction_id: object::uid_to_inner(&auction.id),
             final_price: auction.present_price,
-            bidder_address: ctx.sender()
+            bidder_address: tx_context::sender(ctx)
         });
-        return (item, bid_balance)
+        (item, bid_balance)
     }
 
     // The auctioneer could claim the proceeds after the auction is successfully ended
     public fun claim<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): Balance<T1> {
         assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
         assert!(auction.has_ended, EAuctionHasNotEnded);
-        let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
+        let Auction { id, item, present_price: _, has_ended: _, proceed } = auction;
         object::delete(id);
         option::destroy_none(item);
         let AuctionCap { id, auction_id: _ } = auction_cap;
         object::delete(id);
-        return proceed
+        proceed
     }
 
     // The auctioneer could stop the auction before the auction is ended
     public fun stop<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): T0 {
         assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
         assert!(!auction.has_ended, EAuctionHasEnded);
-        let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
+        let Auction { id, item, present_price: _, has_ended: _, proceed } = auction;
         event::emit(AuctionStopped {
             auction_id: object::uid_to_inner(&id)
         });
@@ -166,7 +175,20 @@ module auction::auction {
         let item = option::destroy_some(item);
         let AuctionCap { id, auction_id: _ } = auction_cap;
         object::delete(id);
-        return item
+        item
     }
 
+    //==============================================================================================
+    // Additional functions
+    //==============================================================================================
+
+    // Get auction proceeds balance
+    public fun get_proceeds<T0: store, T1> (auction: &Auction<T0, T1>): u64 {
+        auction.proceed.value()
+    }
+
+    // Check if a specific address is the auctioneer
+    public fun is_auctioneer<T0: store, T1>(auction: &Auction<T0, T1>, auction_cap: &AuctionCap, addr: address): bool {
+        object::uid_to_inner(&auction.id) == auction_cap.auction_id && tx_context::sender(ctx) == addr
+    }
 }
