@@ -1,172 +1,152 @@
-/*
-
-    - Any user can initiate a new auction and assume the role of the auctioneer.
-    - All users can participate as legitimate bidders.
-    - The auctioneer continuously reduces the price from an initial maximum set at the start of the auction.
-    - When the price drops to an acceptable level, the bidders can pay that price to obtain the auction item.
-    - After the sale, the auctioneer can claim the auction proceeds.
-    - The auctioneer retains the ability to stop the auction at any time.
-
-*/
 module auction::auction {
-
-    //==============================================================================================
-    // Dependencies
-    //==============================================================================================
-
+    use sui::coin;
     use sui::balance::{Self, Balance};
-    use sui::event::{Self};
+    use sui::sui::SUI;
 
-    //==============================================================================================
-    // Error codes
-    //==============================================================================================
-
-    // When auction has already ended.
-    const EAuctionHasEnded: u64 = 0;
-    // When auction is still going on.
-    const EAuctionHasNotEnded: u64 = 1;
-    // When the bidder provides fewer balance.
-    const EBalanceNotEnough: u64 = 2;
-    // When the auctioneer sets new price but higher than the present.
-    const ENewPriceMustBeLower: u64 = 3;
-    // When the auctioneer provides wrong cap.
-    const EAuctionIDMismatch: u64 = 4;
-
-    //==============================================================================================
-    // Events
-    //==============================================================================================
-
-    // When a new auction is created.
-    public struct AuctionCreated has copy, drop {
-        auction_id: ID,
-        maximal_price: u64,
+    /// Stores information about an auction bid.
+    public struct BidData has store {
+        /// Coin representing the current (highest) bid.
+        funds: Balance<SUI>,
+        /// Address of the highest bidder.
+        highest_bidder: address,
     }
 
-    // When a new price is set.
-    public struct NewPriceSet has copy, drop {
-        auction_id: ID,
-        new_price: u64,
-    }
-
-    // When an auction is successfully ended.
-    public struct AuctionSucceeded has copy, drop {
-        auction_id: ID,
-        final_price: u64,
-        bidder_address: address,
-    }
-
-    // When an auction is stopped by the auctioneer.
-    public struct AuctionStopped has copy, drop {
-        auction_id: ID,
-    }
-
-    //==============================================================================================
-    // Structs
-    //==============================================================================================
-
-    // The auction object
-    public struct Auction<T0: store, phantom T1> has key {
+    /// Maintains the state of the auction owned by a trusted
+    /// auctioneer.
+    public struct Auction<T:  key + store> has key {
         id: UID,
-        item: Option<T0>,
-        present_price: u64,
-        has_ended: bool,
-        proceed: Balance<T1>
+        /// Item to be sold. It only really needs to be wrapped in
+        /// Option if Auction represents a shared object but we do it
+        /// for single-owner Auctions for better code re-use.
+        to_sell: Option<T>,
+        /// Owner of the time to be sold.
+        owner: address,
+        /// Data representing the highest bid (starts with no bid)
+        bid_data: Option<BidData>,
     }
 
-    // Capability of being the auctioneer
-    public struct AuctionCap has key, store {
-        id: UID,
-        auction_id: ID
+    public(package) fun auction_owner<T: key + store>(auction: &Auction<T>): address {
+        auction.owner
     }
 
-    //==============================================================================================
-    // Getters
-    //==============================================================================================
-
-    // Get the present auction price
-    public fun get_present_price<T0: store, T1> (auction: &Auction<T0, T1>): u64 {
-        return auction.present_price
-    }
-
-    //==============================================================================================
-    // Public functions
-    //==============================================================================================
-
-    // Create a new auction
-    public fun create<T0: store, T1> (item: T0, maximal_price: u64, ctx: &mut TxContext): AuctionCap {
-        let auction = Auction<T0, T1> {
+    /// Creates an auction. This is executed by the owner of the asset to be
+    /// auctioned.
+    public(package) fun create_auction<T: key + store>(
+        to_sell: T, ctx: &mut TxContext
+    ): Auction<T> {
+        // A question one might asked is how do we know that to_sell
+        // is owned by the caller of this entry function and the
+        // answer is that it's checked by the runtime.
+        Auction<T> {
             id: object::new(ctx),
-            item: option::some(item),
-            present_price: maximal_price,
-            has_ended: false,
-            proceed: balance::zero()
+            to_sell: option::some(to_sell),
+            owner: tx_context::sender(ctx),
+            bid_data: option::none(),
+        }
+    }
+
+    /// Updates the auction based on the information in the bid
+    /// (update auction if higher bid received and send coin back for
+    /// bids that are too low).
+    public fun update_auction<T: key + store>(
+        auction: &mut Auction<T>,
+        bidder: address,
+        funds: Balance<SUI>,
+        ctx: &mut TxContext,
+    ) {
+        if (option::is_none(&auction.bid_data)) {
+            // first bid
+            let bid_data = BidData {
+                funds,
+                highest_bidder: bidder,
+            };
+            option::fill(&mut auction.bid_data, bid_data);
+        } else {
+            let prev_bid_data = option::borrow(&auction.bid_data);
+            if (balance::value(&funds) > balance::value(&prev_bid_data.funds)) {
+                // a bid higher than currently highest bid received
+                let new_bid_data = BidData {
+                    funds,
+                    highest_bidder: bidder
+                };
+
+                // update auction to reflect highest bid
+                let BidData {
+                    funds,
+                    highest_bidder
+                } = option::swap(&mut auction.bid_data, new_bid_data);
+
+                // transfer previously highest bid to its bidder
+                send_balance(funds, highest_bidder, ctx);
+            } else {
+                // a bid is too low - return funds to the bidder
+                send_balance(funds, bidder, ctx);
+            }
+        }
+    }
+
+    /// Ends the auction - transfers item to the currently highest
+    /// bidder or to the original owner if no bids have been placed.
+    fun end_auction<T: key + store>(
+        to_sell: &mut Option<T>,
+        owner: address,
+        bid_data: &mut Option<BidData>,
+        ctx: &mut TxContext
+    ) {
+        let item = option::extract(to_sell);
+        if (option::is_some<BidData>(bid_data)) {
+            // bids have been placed - send funds to the original item
+            // owner and the item to the highest bidder
+            let BidData {
+                funds,
+                highest_bidder
+            } = option::extract(bid_data);
+
+            send_balance(funds, owner, ctx);
+            transfer::public_transfer(item, highest_bidder);
+        } else {
+            // no bids placed - send the item back to the original owner
+            transfer::public_transfer(item, owner);
         };
-        let auction_cap = AuctionCap {
-            id: object::new(ctx),
-            auction_id: object::uid_to_inner(&auction.id)
-        };
-        event::emit(AuctionCreated {
-            auction_id: object::uid_to_inner(&auction.id),
-            maximal_price: auction.present_price
-        });
-        transfer::share_object(auction);
-        return auction_cap
     }
 
-    // The auctioneer could set a new auction price
-    public fun set_price<T0: store, T1> (auction: &mut Auction<T0, T1>, auction_cap: &AuctionCap, new_price: u64) {
-        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
-        assert!(!auction.has_ended, EAuctionHasEnded);
-        assert!(new_price < auction.present_price, ENewPriceMustBeLower);
-        auction.present_price = new_price;
-        event::emit(NewPriceSet {
-            auction_id: object::uid_to_inner(&auction.id),
-            new_price: auction.present_price
-        });
-    }
-
-    // Anyone could bid the price and get the auction item (if succeeded)
-    public fun bid<T0: store, T1> (auction: &mut Auction<T0, T1>, mut bid_balance: Balance<T1>, ctx: &mut TxContext): (T0, Balance<T1>) {
-        assert!(!auction.has_ended, EAuctionHasEnded);
-        assert!(bid_balance.value() >= auction.present_price, EBalanceNotEnough);
-        let proceed = balance::split(&mut bid_balance, auction.present_price);
-        balance::join(&mut auction.proceed, proceed);
-        auction.has_ended = true;
-        let item = option::extract(&mut auction.item);
-        event::emit(AuctionSucceeded {
-            auction_id: object::uid_to_inner(&auction.id),
-            final_price: auction.present_price,
-            bidder_address: ctx.sender()
-        });
-        return (item, bid_balance)
-    }
-
-    // The auctioneer could claim the proceeds after the auction is successfully ended
-    public fun claim<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): Balance<T1> {
-        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
-        assert!(auction.has_ended, EAuctionHasNotEnded);
-        let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
+    /// Ends auction and destroys auction object (can only be used if
+    /// Auction is single-owner object) - transfers item to the
+    /// currently highest bidder or to the original owner if no bids
+    /// have been placed.
+    public fun end_and_destroy_auction<T: key + store>(
+        auction: Auction<T>, ctx: &mut TxContext
+    ) {
+        let Auction { id, mut to_sell, owner, mut bid_data } = auction;
         object::delete(id);
-        option::destroy_none(item);
-        let AuctionCap { id, auction_id: _ } = auction_cap;
-        object::delete(id);
-        return proceed
+
+        end_auction(&mut to_sell, owner, &mut bid_data, ctx);
+
+        option::destroy_none(bid_data);
+        option::destroy_none(to_sell);
     }
 
-    // The auctioneer could stop the auction before the auction is ended
-    public fun stop<T0: store, T1> (auction: Auction<T0, T1>, auction_cap: AuctionCap): T0 {
-        assert!(object::uid_to_inner(&auction.id) == auction_cap.auction_id, EAuctionIDMismatch);
-        assert!(!auction.has_ended, EAuctionHasEnded);
-        let Auction<T0, T1> { id, item, present_price: _, has_ended: _, proceed } = auction;
-        event::emit(AuctionStopped {
-            auction_id: object::uid_to_inner(&id)
-        });
-        object::delete(id);
-        balance::destroy_zero(proceed);
-        let item = option::destroy_some(item);
-        let AuctionCap { id, auction_id: _ } = auction_cap;
-        object::delete(id);
-        return item
+    /// Ends auction (should only be used if Auction is a shared
+    /// object) - transfers item to the currently highest bidder or to
+    /// the original owner if no bids have been placed.
+    public fun end_shared_auction<T: key + store>(
+        auction: &mut Auction<T>, ctx: &mut TxContext
+    ) {
+        end_auction(&mut auction.to_sell, auction.owner, &mut auction.bid_data, ctx);
     }
 
+    /// Helper for the most common operation - wrapping a balance and sending it
+    fun send_balance(balance: Balance<SUI>, to: address, ctx: &mut TxContext) {
+        transfer::public_transfer(coin::from_balance(balance, ctx), to)
+    }
+
+    /// exposes transfer::transfer
+    public fun transfer<T: key + store>(obj: Auction<T>, recipient: address) {
+        transfer::transfer(obj, recipient)
+    }
+
+    #[allow(lint(share_owned))]
+    public fun share_object<T: key + store>(obj: Auction<T>) {
+        transfer::share_object(obj)
+    }
 }
